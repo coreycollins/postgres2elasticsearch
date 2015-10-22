@@ -20,6 +20,7 @@ type options struct {
 	URI            string `json:"url"`
 	MaxBulkActions int    `json:"max_bulk_actions"`
 	MaxFetchRows   int    `json:"max_fetch_rows"`
+	Timeout        string `json:"timeout"`
 	DB             struct {
 		Host     string `json:"host"`
 		Port     int    `json:"port"`
@@ -40,6 +41,17 @@ var status = make(chan int)
 // Global counters
 var succeded, failed uint64
 
+func sendBulkService(bulkService *elastic.BulkService) {
+	trying := bulkService.NumberOfActions()
+	if bulkResponse, err := bulkService.Do(); err != nil {
+		atomic.AddUint64(&failed, uint64(trying))
+	} else {
+		atomic.AddUint64(&succeded, uint64(len(bulkResponse.Succeeded())))
+		atomic.AddUint64(&failed, uint64(len(bulkResponse.Failed())))
+	}
+	status <- 1
+}
+
 // Index worker function to insert docs
 func index(wg *sync.WaitGroup, opts options) {
 
@@ -51,7 +63,7 @@ func index(wg *sync.WaitGroup, opts options) {
 	}
 
 	// Create new bulk service request
-	bulkService := elastic.NewBulkService(client).Index(opts.Index).Type(opts.Type)
+	bulkService := elastic.NewBulkService(client).Index(opts.Index).Type(opts.Type).Timeout(opts.Timeout)
 	for doc := range indexQ {
 
 		//Add index to request
@@ -60,12 +72,14 @@ func index(wg *sync.WaitGroup, opts options) {
 
 		// Send request after MaxBulkActions limit is reached
 		if bulkService.NumberOfActions() > opts.MaxBulkActions-1 {
-			bulkResponse, _ := bulkService.Do()
-			atomic.AddUint64(&succeded, uint64(len(bulkResponse.Succeeded())))
-			atomic.AddUint64(&failed, uint64(len(bulkResponse.Failed())))
-			status <- 1
+			sendBulkService(bulkService)
 		}
 
+	}
+
+	// Send last indexes
+	if bulkService.NumberOfActions() > 0 {
+		sendBulkService(bulkService)
 	}
 
 	wg.Done()
@@ -132,20 +146,26 @@ func setup(opts options) {
 	}
 
 	// Create index if does not exist
+	fmt.Print("Checking is index exists...")
 	exs := client.IndexExists(opts.Index)
 	if ok, err := exs.Do(); !ok {
 		if err != nil {
 			log.Fatalln(err.Error())
 		}
 
+		fmt.Print("no. Creating...")
 		newIndex := elastic.NewIndexService(client).Index(opts.Index)
 		_, err := newIndex.Do()
 		if err != nil {
 			log.Fatalln(err.Error())
 		}
+		fmt.Println("done.")
+	} else {
+		fmt.Println("yes")
 	}
 
 	//Create mappings
+	fmt.Print("Putting mappings...")
 	for _, mapping := range opts.Mappings {
 
 		// Send raw json from options
@@ -154,9 +174,11 @@ func setup(opts options) {
 			log.Fatalln(err.Error())
 		}
 	}
+	fmt.Println("done.")
 
 	client.Stop()
 
+	fmt.Println("\nSetup finished.")
 }
 
 func main() {
@@ -224,6 +246,9 @@ func main() {
 		}
 	}()
 
+	// Print start of progress
+	status <- 1
+
 	//Postgres go library doesn't allow dynamic table placeholders
 	statement := fmt.Sprintf("SELECT row_to_json(t) FROM %s as t LIMIT %s", opts.DB.Table, limit)
 	rows, err := db.Query(statement)
@@ -251,4 +276,5 @@ func main() {
 	wg.Wait()
 
 	print() // Print last update
+	fmt.Println("\n\nFinished")
 }
