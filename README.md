@@ -1,7 +1,9 @@
 ## postgres2elasticsearch
 
 Handy little program to bulk insert large postgres databases into elasticsearch. It uses postgres's row_to_json function to
-select the table columns as JSON and upload them using the bulk insert API.
+select the table columns as JSON and upload them using the bulk insert API. It was modeled after the grest jdbc bulk loader here: https://github.com/jprante/elasticsearch-jdbc
+
+However, it waits for a response from ElasticSearch which prevents falied inserts when the ElasticSearch bulk loader queue is full.
 
 #### Requirements
 
